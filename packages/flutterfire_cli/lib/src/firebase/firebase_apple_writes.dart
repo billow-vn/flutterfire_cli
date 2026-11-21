@@ -534,10 +534,12 @@ bashScript = %q(
 #!/bin/bash
 PATH="\${PATH}:\$FLUTTER_ROOT/bin:\${PUB_CACHE}/bin:\$HOME/.pub-cache/bin"
 
-if [ -n "\$PODS_ROOT" ] && [ -f "\$PODS_ROOT/FirebaseCrashlytics/run" ]; then
+if [ -n "\$PODS_ROOT" ] && [ -f "\$PODS_ROOT/FirebaseCrashlytics/upload-symbols" ]; then
   # CocoaPods installation.
+  PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\$PODS_ROOT/FirebaseCrashlytics/upload-symbols"
+elif [ -n "\$PODS_ROOT" ] && [ -f "\$PODS_ROOT/FirebaseCrashlytics/run" ]; then
   PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\$PODS_ROOT/FirebaseCrashlytics/run"
-elif [ -f "\${SRCROOT}/../\${FLUTTER_BUILD_DIR:-build}/$platform/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run" ]; then
+elif [ -f "\${SRCROOT}/../\${FLUTTER_BUILD_DIR:-build}/$platform/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols" ]; then
   # Swift Package Manager installation. Since Flutter 3.44 the SPM checkouts are
   # cloned into Flutter's build directory via -clonedSourcePackagesDirPath
   # ("<project>/<build-dir>/$platform/SourcePackages") instead of Xcode's
@@ -545,23 +547,29 @@ elif [ -f "\${SRCROOT}/../\${FLUTTER_BUILD_DIR:-build}/$platform/SourcePackages/
   # "flutter config --build-dir", defaults to "build") and is present for both
   # regular and archive builds. SRCROOT is the "$platform" dir, so its parent is
   # the Flutter project root (FLUTTER_APPLICATION_PATH).
+  PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\${SRCROOT}/../\${FLUTTER_BUILD_DIR:-build}/$platform/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols"
+elif [ -f "\${SRCROOT}/../\${FLUTTER_BUILD_DIR:-build}/$platform/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run" ]; then
   PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\${SRCROOT}/../\${FLUTTER_BUILD_DIR:-build}/$platform/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"
-elif [ -n "\$BUILD_DIR" ] && [ -f "\$BUILD_DIR/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run" ]; then
+elif [ -n "\$BUILD_DIR" ] && [ -f "\$BUILD_DIR/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols" ]; then
   # Swift Package Manager installation. Flutter resolves Swift Package Manager
   # checkouts into "\$BUILD_DIR/SourcePackages" (i.e. "<project>/[ios|macos]/build/SourcePackages"),
   # rather than the Xcode DerivedData directory used for a plain Xcode project.
+  PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\$BUILD_DIR/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols"
+elif [ -n "\$BUILD_DIR" ] && [ -f "\$BUILD_DIR/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run" ]; then
   PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\$BUILD_DIR/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"
 else
   # Fall back to the Xcode DerivedData directory in case Swift Package Manager
   # checkouts are not resolved relative to "\$BUILD_DIR" (older/alternative setups).
   # Cannot use "BUILD_DIR%/Build/*" as per Firebase documentation, it points to "flutter-project/build/ios/*" path which doesn't have run script
   DERIVED_DATA_PATH=\$(echo "\$BUILD_ROOT" | sed -E 's|(.*DerivedData/[^/]+).*|\\1|')
-  PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\${DERIVED_DATA_PATH}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"
-
-  if [ ! -f "\$PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT" ]; then
+  if [ -f "\${DERIVED_DATA_PATH}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols" ]; then
+    PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\${DERIVED_DATA_PATH}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols"
+  elif [ -f "\${DERIVED_DATA_PATH}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run" ]; then
+    PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\${DERIVED_DATA_PATH}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"
+  else
     # Last resort: search both known Swift Package Manager checkout roots in case
     # the exact expected layout above does not match this Xcode/Flutter version.
-    FOUND_UPLOAD_SCRIPT=\$(find "\$BUILD_DIR" "\${DERIVED_DATA_PATH}" -type f -path '*firebase-ios-sdk/Crashlytics/run' -print -quit 2>/dev/null)
+    FOUND_UPLOAD_SCRIPT=\$(find "\$BUILD_DIR" "\${DERIVED_DATA_PATH}" -type f \\( -path '*firebase-ios-sdk/Crashlytics/upload-symbols' -o -path '*firebase-ios-sdk/Crashlytics/run' \\) -print -quit 2>/dev/null)
     if [ -n "\$FOUND_UPLOAD_SCRIPT" ]; then
       PATH_TO_CRASHLYTICS_UPLOAD_SCRIPT="\$FOUND_UPLOAD_SCRIPT"
     fi

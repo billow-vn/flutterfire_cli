@@ -191,6 +191,10 @@ class UploadCrashlyticsSymbols extends FlutterFireCommand {
     return argResults!['target'] as String?;
   }
 
+  String? get debugSymbolsPath {
+    return argResults!['debug-symbols-path'] as String?;
+  }
+
   String? get defaultConfig {
     return argResults!['default-config'] as String?;
   }
@@ -364,7 +368,16 @@ class UploadCrashlyticsSymbols extends FlutterFireCommand {
     final buildConfiguration =
         buildDirectory.existsSync() ? 'Release' : 'Debug';
 
-    if (!File(uploadSymbolsScriptPath).existsSync()) {
+    var executablePath = uploadSymbolsScriptPath;
+    if (path.basename(executablePath) == 'run') {
+      final uploadSymbolsBinary =
+          path.join(path.dirname(executablePath), 'upload-symbols');
+      if (File(uploadSymbolsBinary).existsSync()) {
+        executablePath = uploadSymbolsBinary;
+      }
+    }
+
+    if (!File(executablePath).existsSync()) {
       throw Exception(
         'Could not find the Crashlytics upload symbols script at '
         '"$uploadSymbolsScriptPath". This usually means CocoaPods or Swift '
@@ -374,54 +387,170 @@ class UploadCrashlyticsSymbols extends FlutterFireCommand {
       );
     }
 
-    // Validation script
-    final validationScript = await Process.run(
-      uploadSymbolsScriptPath,
-      [
-        '--validate',
-        '--flutter-project',
-        appIdFilePath,
-      ],
-      environment: {
-        'PLATFORM_NAME': envPlatformName,
-        'CONFIGURATION': buildConfiguration,
-        'PROJECT_DIR': envProjectDir,
-        'DWARF_DSYM_FOLDER_PATH': envDwarfDsymFolderPath,
-        'DWARF_DSYM_FILE_NAME': envDwarfDsymFileName,
-        'INFOPLIST_PATH': envInfoPlistPath,
-        'BUILT_PRODUCTS_DIR': envBuildProductsDir,
-      },
-    );
-
-    if (validationScript.exitCode != 0) {
-      throw Exception(validationScript.stderr);
+    if (Platform.isMacOS || Platform.isLinux) {
+      try {
+        await Process.run('chmod', ['+x', executablePath]);
+      } catch (_) {}
     }
 
-    // Upload script
-    final uploadScript = await Process.run(
-      uploadSymbolsScriptPath,
-      [
-        '--flutter-project',
-        appIdFilePath,
-      ],
-      environment: {
-        'PLATFORM_NAME': envPlatformName,
-        'CONFIGURATION': buildConfiguration,
-        'PROJECT_DIR': envProjectDir,
-        'DWARF_DSYM_FOLDER_PATH': envDwarfDsymFolderPath,
-        'DWARF_DSYM_FILE_NAME': envDwarfDsymFileName,
-        'INFOPLIST_PATH': envInfoPlistPath,
-        'BUILT_PRODUCTS_DIR': envBuildProductsDir,
-      },
-    );
+    final isUploadSymbolsBinary =
+        path.basename(executablePath) == 'upload-symbols';
 
-    if (uploadScript.exitCode != 0) {
-      throw Exception(uploadScript.stderr);
-    }
+    if (isUploadSymbolsBinary) {
+      final targetPlatform = platform == 'macos' ? 'mac' : 'ios';
 
-    if (uploadScript.stdout != null) {
-      stdout.write(uploadScript.stdout as String);
-      logger.stdout(uploadScript.stdout as String);
+      final dsymPaths = <String>[];
+      if (debugSymbolsPath != null &&
+          (Directory(debugSymbolsPath!).existsSync() ||
+              File(debugSymbolsPath!).existsSync())) {
+        dsymPaths.add(debugSymbolsPath!);
+      } else if (Directory(envDwarfDsymFolderPath).existsSync()) {
+        dsymPaths.add(envDwarfDsymFolderPath);
+      } else {
+        final appDsym = path.join(envDwarfDsymFolderPath, envDwarfDsymFileName);
+        if (FileSystemEntity.isDirectorySync(appDsym) ||
+            FileSystemEntity.isFileSync(appDsym)) {
+          dsymPaths.add(appDsym);
+        } else if (envDwarfDsymFolderPath.isNotEmpty) {
+          dsymPaths.add(envDwarfDsymFolderPath);
+        }
+      }
+
+      if (buildDirectory.existsSync() &&
+          envDwarfDsymFolderPath.isNotEmpty &&
+          !path.isWithin(envDwarfDsymFolderPath, appFrameworkDsymPath) &&
+          !dsymPaths.contains(appFrameworkDsymPath)) {
+        dsymPaths.add(appFrameworkDsymPath);
+      }
+
+      // Validation script
+      final validationScript = await Process.run(
+        executablePath,
+        [
+          '-ai',
+          appId,
+          '-p',
+          targetPlatform,
+          '-val',
+          '--',
+          ...dsymPaths,
+        ],
+        environment: {
+          'PLATFORM_NAME': envPlatformName,
+          'CONFIGURATION': buildConfiguration,
+          'PROJECT_DIR': envProjectDir,
+          'DWARF_DSYM_FOLDER_PATH': envDwarfDsymFolderPath,
+          'DWARF_DSYM_FILE_NAME': envDwarfDsymFileName,
+          'INFOPLIST_PATH': envInfoPlistPath,
+          'BUILT_PRODUCTS_DIR': envBuildProductsDir,
+        },
+      );
+
+      if (validationScript.exitCode != 0) {
+        final errorMsg = validationScript.stderr.toString().isNotEmpty
+            ? validationScript.stderr
+            : validationScript.stdout;
+        throw Exception(errorMsg);
+      }
+
+      if (validationScript.stdout != null &&
+          (validationScript.stdout as String).isNotEmpty) {
+        stdout.write(validationScript.stdout as String);
+      }
+
+      logger.stdout('Uploading $platform dSYMs using $executablePath...');
+
+      // Upload script
+      final process = await Process.start(
+        executablePath,
+        [
+          '-ai',
+          appId,
+          '-p',
+          targetPlatform,
+          '--',
+          ...dsymPaths,
+        ],
+        environment: {
+          'PLATFORM_NAME': envPlatformName,
+          'CONFIGURATION': buildConfiguration,
+          'PROJECT_DIR': envProjectDir,
+          'DWARF_DSYM_FOLDER_PATH': envDwarfDsymFolderPath,
+          'DWARF_DSYM_FILE_NAME': envDwarfDsymFileName,
+          'INFOPLIST_PATH': envInfoPlistPath,
+          'BUILT_PRODUCTS_DIR': envBuildProductsDir,
+        },
+      );
+
+      final errorBuffer = StringBuffer();
+
+      process.stdout.transform(utf8.decoder).listen((data) {
+        stdout.write(data);
+      });
+
+      process.stderr.transform(utf8.decoder).listen((data) {
+        stderr.write(data);
+        errorBuffer.write(data);
+      });
+
+      final exitCode = await process.exitCode;
+      if (exitCode != 0) {
+        throw Exception(
+          errorBuffer.isNotEmpty
+              ? errorBuffer.toString()
+              : 'Upload symbols failed with exit code $exitCode',
+        );
+      }
+    } else {
+      // Fallback for legacy 'run' wrapper script
+      final validationScript = await Process.run(
+        executablePath,
+        [
+          '--validate',
+          '--flutter-project',
+          appIdFilePath,
+        ],
+        environment: {
+          'PLATFORM_NAME': envPlatformName,
+          'CONFIGURATION': buildConfiguration,
+          'PROJECT_DIR': envProjectDir,
+          'DWARF_DSYM_FOLDER_PATH': envDwarfDsymFolderPath,
+          'DWARF_DSYM_FILE_NAME': envDwarfDsymFileName,
+          'INFOPLIST_PATH': envInfoPlistPath,
+          'BUILT_PRODUCTS_DIR': envBuildProductsDir,
+        },
+      );
+
+      if (validationScript.exitCode != 0) {
+        throw Exception(validationScript.stderr);
+      }
+
+      // Upload script
+      final uploadScript = await Process.run(
+        executablePath,
+        [
+          '--flutter-project',
+          appIdFilePath,
+        ],
+        environment: {
+          'PLATFORM_NAME': envPlatformName,
+          'CONFIGURATION': buildConfiguration,
+          'PROJECT_DIR': envProjectDir,
+          'DWARF_DSYM_FOLDER_PATH': envDwarfDsymFolderPath,
+          'DWARF_DSYM_FILE_NAME': envDwarfDsymFileName,
+          'INFOPLIST_PATH': envInfoPlistPath,
+          'BUILT_PRODUCTS_DIR': envBuildProductsDir,
+        },
+      );
+
+      if (uploadScript.exitCode != 0) {
+        throw Exception(uploadScript.stderr);
+      }
+
+      if (uploadScript.stdout != null) {
+        stdout.write(uploadScript.stdout as String);
+        logger.stdout(uploadScript.stdout as String);
+      }
     }
   }
 }
